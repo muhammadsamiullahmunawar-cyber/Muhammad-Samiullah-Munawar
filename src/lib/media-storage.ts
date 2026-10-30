@@ -7,11 +7,20 @@ const BUCKET = "chat-media";
 const signedUrlCache = new Map<string, { url: string; exp: number }>();
 const TTL_MS = 50 * 60 * 1000;
 
-export async function getSignedMediaUrl(path: string | null | undefined): Promise<string | null> {
+export function evictSignedUrl(path: string | null | undefined) {
+  if (path) signedUrlCache.delete(path);
+}
+
+export async function getSignedMediaUrl(
+  path: string | null | undefined,
+  forceRefresh = false,
+): Promise<string | null> {
   if (!path) return null;
-  const hit = signedUrlCache.get(path);
-  if (hit && hit.exp > Date.now()) {
-    return hit.url;
+  if (!forceRefresh) {
+    const hit = signedUrlCache.get(path);
+    if (hit && hit.exp > Date.now()) {
+      return hit.url;
+    }
   }
 
   const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, 3600);
@@ -21,6 +30,84 @@ export async function getSignedMediaUrl(path: string | null | undefined): Promis
 
   signedUrlCache.set(path, { url: data.signedUrl, exp: Date.now() + TTL_MS });
   return data.signedUrl;
+}
+
+export async function downloadMedia({
+  path,
+  mimeType,
+  fallbackFilename,
+}: {
+  path: string;
+  mimeType?: string | null;
+  fallbackFilename?: string;
+}): Promise<void> {
+  let ext = "bin";
+  if (mimeType) {
+    if (mimeType.includes("mp4")) ext = "mp4";
+    else if (mimeType.includes("webm")) ext = "webm";
+    else if (mimeType.includes("ogg")) ext = "ogg";
+    else if (mimeType.includes("wav")) ext = "wav";
+    else if (mimeType.includes("jpeg") || mimeType.includes("jpg")) ext = "jpg";
+    else if (mimeType.includes("png")) ext = "png";
+    else if (mimeType.includes("webp")) ext = "webp";
+    else if (mimeType.includes("gif")) ext = "gif";
+  } else if (path.includes(".")) {
+    const parts = path.split(".");
+    ext = parts[parts.length - 1].toLowerCase().replace(/[^a-z0-9]/g, "") || "bin";
+  }
+  const filename = fallbackFilename || `techu-${Date.now()}.${ext}`;
+
+  // 1. Try createSignedUrl with { download: filename }
+  let downloadUrl: string | null = null;
+  try {
+    const { data, error } = await supabase.storage
+      .from(BUCKET)
+      .createSignedUrl(path, 3600, { download: filename });
+    if (!error && data?.signedUrl) {
+      downloadUrl = data.signedUrl;
+    }
+  } catch {
+    // fallback to normal signed URL
+  }
+
+  if (!downloadUrl) {
+    downloadUrl = await getSignedMediaUrl(path);
+  }
+
+  if (!downloadUrl) throw new Error("Could not generate download link");
+
+  // 2. Fetch blob to guarantee Android Chrome saves the file with correct name and extension
+  try {
+    let res = await fetch(downloadUrl);
+    if (!res.ok && (res.status === 400 || res.status === 403)) {
+      // Refresh expired signed URL once
+      evictSignedUrl(path);
+      const fresh = await getSignedMediaUrl(path, true);
+      if (fresh) {
+        res = await fetch(fresh);
+      }
+    }
+    if (!res.ok) throw new Error(`Download HTTP error ${res.status}`);
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 30000);
+  } catch (err) {
+    console.error("Direct blob download failed, falling back to link click:", err);
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = filename;
+    a.target = "_blank";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 }
 
 // React hook to fetch and keep signed media URL refreshed

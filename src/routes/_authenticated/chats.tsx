@@ -1,10 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, memo, type FormEvent } from "react";
 import {
   ArrowLeft,
   Check,
   CheckCheck,
+  Download,
   Film,
   Loader2,
   LogOut,
@@ -54,7 +55,7 @@ import { useAvatarUrl } from "@/lib/avatar";
 import { MediaLightbox, type LightboxItem } from "@/components/MediaLightbox";
 import { AudioPlayerBubble } from "@/components/AudioPlayerBubble";
 import { VoiceRecorder } from "@/components/VoiceRecorder";
-import { uploadChatMedia, useSignedMediaUrl } from "@/lib/media-storage";
+import { downloadMedia, getSignedMediaUrl, uploadChatMedia, useSignedMediaUrl } from "@/lib/media-storage";
 import {
   formatDuration,
   processAndCompressImage,
@@ -141,6 +142,83 @@ function ChatsPage() {
   );
   const active = chats.data?.find((x) => x.id === c);
 
+  const markChatRead = async (chatId: string) => {
+    if (!chatId || !me) return;
+    const nowIso = new Date().toISOString();
+
+    // Optimistically set unread to 0 and myLastRead to now
+    qc.setQueryData<ChatSummary[]>(["chats", me], (old) => {
+      if (!old) return old;
+      return old.map((x) =>
+        x.id === chatId ? { ...x, unread: 0, myLastRead: nowIso } : x,
+      );
+    });
+
+    try {
+      const { error } = await supabase
+        .from("conversation_members")
+        .update({ last_read_at: nowIso })
+        .eq("conversation_id", chatId)
+        .eq("user_id", me);
+
+      if (error) {
+        console.error("[markChatRead Error]:", error.message || error);
+      }
+    } catch (err) {
+      console.error("[markChatRead Exception]:", err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Mark read on opening the chat & reset horizontal scroll
+  useEffect(() => {
+    if (c) {
+      markChatRead(c);
+      if (typeof window !== "undefined") {
+        window.scrollTo(0, 0);
+        document.documentElement.scrollLeft = 0;
+        document.body.scrollLeft = 0;
+      }
+    }
+  }, [c]);
+
+  // Mark read when tab becomes visible again or gets window focus
+  useEffect(() => {
+    const handleVis = () => {
+      if (typeof document !== "undefined" && !document.hidden && c) {
+        markChatRead(c);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVis);
+    window.addEventListener("focus", handleVis);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVis);
+      window.removeEventListener("focus", handleVis);
+    };
+  }, [c]);
+
+  // Temporary development-only horizontal overflow detector (zero footprint in production)
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "production" && typeof window !== "undefined") {
+      const timer = setTimeout(() => {
+        const docW = window.innerWidth;
+        const allEls = document.querySelectorAll("*");
+        for (const el of allEls) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            if (rect.right > docW + 1 || rect.left < -1) {
+              console.warn("[Dev Overflow Check] Offending element:", el, {
+                left: rect.left,
+                right: rect.right,
+                windowWidth: docW,
+              });
+            }
+          }
+        }
+      }, 1500);
+      return () => clearTimeout(timer);
+    }
+  }, [c]);
+
   async function signOut() {
     await qc.cancelQueries();
     qc.clear();
@@ -149,26 +227,32 @@ function ChatsPage() {
   }
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
+    <div className="flex h-[100dvh] min-h-[100dvh] max-h-[100dvh] w-full overflow-hidden overflow-x-hidden bg-background">
       <aside
         className={`${c ? "hidden md:flex" : "flex"} w-full flex-col border-e bg-sidebar md:w-[360px]`}
       >
         <div className="flex items-center justify-between px-4 py-3">
           <Brand />
-          <div className="flex items-center">
+          <div className="flex items-center gap-0.5 sm:gap-1">
             <LangToggle />
             <button
               onClick={() => setProfileOpen(true)}
               aria-label={t("myProfile")}
-              className="rounded-full transition-opacity hover:opacity-80"
+              className="flex size-10 items-center justify-center rounded-full transition-opacity hover:opacity-80 touch-manipulation"
             >
               <Avatar
                 name={myProfile?.display_name || myProfile?.username || "?"}
                 url={myProfile?.avatar_url}
               />
             </button>
-            <Button variant="ghost" size="icon" onClick={signOut} aria-label={t("signOut")}>
-              <LogOut />
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={signOut}
+              aria-label={t("signOut")}
+              className="size-10 touch-manipulation"
+            >
+              <LogOut className="size-4" />
             </Button>
           </div>
         </div>
@@ -176,7 +260,7 @@ function ChatsPage() {
           <div className="relative flex-1">
             <Search className="absolute start-3 top-2.5 size-4 text-muted-foreground" />
             <Input
-              className="rounded-full ps-9"
+              className="h-10 rounded-full ps-9 text-base md:text-sm"
               placeholder={t("searchChats")}
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
@@ -185,20 +269,20 @@ function ChatsPage() {
           <Button
             size="icon"
             variant="secondary"
-            className="rounded-full"
+            className="size-10 shrink-0 rounded-full touch-manipulation"
             onClick={() => setDialog("direct")}
             aria-label={t("newChat")}
           >
-            <UserPlus />
+            <UserPlus className="size-4" />
           </Button>
           <Button
             size="icon"
             variant="secondary"
-            className="rounded-full"
+            className="size-10 shrink-0 rounded-full touch-manipulation"
             onClick={() => setDialog("group")}
             aria-label={t("newGroup")}
           >
-            <Users />
+            <Users className="size-4" />
           </Button>
         </div>
         <ul className="flex-1 overflow-y-auto">
@@ -208,7 +292,7 @@ function ChatsPage() {
               <li key={x.id}>
                 <button
                   onClick={() => navigate({ search: { c: x.id } })}
-                  className={`flex w-full items-center gap-3 px-4 py-3 text-start transition-colors hover:bg-sidebar-accent ${x.id === c ? "bg-sidebar-accent" : ""}`}
+                  className={`flex w-full items-center gap-3 px-4 py-3 text-start transition-colors hover:bg-sidebar-accent touch-manipulation ${x.id === c ? "bg-sidebar-accent" : ""}`}
                 >
                   <Avatar
                     name={x.name}
@@ -247,7 +331,7 @@ function ChatsPage() {
                       </span>
                       {x.unread > 0 && (
                         <span className="grid min-w-5 place-items-center rounded-full bg-primary px-1.5 text-xs font-bold text-primary-foreground">
-                          {x.unread}
+                          {x.unread > 99 ? "99+" : x.unread}
                         </span>
                       )}
                     </div>
@@ -264,7 +348,14 @@ function ChatsPage() {
         </ul>
       </aside>
 
-      <section className={`${c ? "flex" : "hidden md:flex"} flex-1 flex-col`}>
+      <section
+        className={`${
+          c
+            ? "max-md:fixed max-md:inset-0 max-md:z-20 max-md:h-[100dvh] max-md:w-full max-md:left-0 max-md:right-0 max-md:top-0 max-md:bottom-0 max-md:bg-background max-md:overflow-hidden md:flex"
+            : "hidden md:flex"
+        } flex-1 flex-col min-h-0 min-w-0`}
+        style={{ transform: "none", margin: 0 }}
+      >
         {active ? (
           <ChatView
             key={active.id}
@@ -273,7 +364,11 @@ function ChatsPage() {
             online={online}
             contactsMap={contactsMap}
             onEditContact={(p) => setContactModalUser(p)}
-            onBack={() => navigate({ search: {} })}
+            onBack={() => {
+              if (active) markChatRead(active.id);
+              navigate({ search: {} });
+            }}
+            onMarkRead={markChatRead}
           />
         ) : (
           <div className="chat-wallpaper grid flex-1 place-items-center p-6 text-center text-muted-foreground">
@@ -715,6 +810,26 @@ function ChatBubbleMedia({
   onOpenLightbox: (item: LightboxItem) => void;
 }) {
   const url = useSignedMediaUrl(message.media_path);
+  const [downloading, setDownloading] = useState(false);
+
+  const handleDownload = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!message.media_path) return;
+    setDownloading(true);
+    try {
+      await downloadMedia({
+        path: message.media_path,
+        mimeType: message.media_mime_type,
+      });
+      toast.success(
+        message.message_type === "image" ? "Photo downloaded" : "Video downloaded",
+      );
+    } catch {
+      toast.error("Download failed");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   if (message.message_type === "voice") {
     return (
@@ -722,27 +837,49 @@ function ChatBubbleMedia({
         src={url}
         durationSeconds={message.media_duration_seconds}
         isMine={isMine}
+        mimeType={message.media_mime_type}
+        mediaPath={message.media_path}
+        onRefreshUrl={() => getSignedMediaUrl(message.media_path, true)}
       />
     );
   }
 
   if (message.message_type === "image") {
     return (
-      <div className="my-1 overflow-hidden rounded-xl">
+      <div className="relative my-1 overflow-hidden rounded-xl group/media">
         {url ? (
-          <button
-            type="button"
-            className="block cursor-pointer overflow-hidden rounded-xl transition-opacity hover:opacity-95"
-            onClick={() => onOpenLightbox({ type: "image", url, title: message.body })}
-            aria-label="View photo in fullscreen"
-          >
-            <img
-              src={url}
-              alt=""
-              loading="lazy"
-              className="max-h-72 w-auto max-w-full rounded-xl object-cover"
-            />
-          </button>
+          <>
+            <button
+              type="button"
+              className="block cursor-pointer overflow-hidden rounded-xl transition-opacity hover:opacity-95"
+              onClick={() => onOpenLightbox({ type: "image", url, title: message.body })}
+              aria-label="View photo in fullscreen"
+            >
+              <img
+                src={url}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                className="max-h-72 w-auto max-w-full rounded-xl object-cover"
+              />
+            </button>
+            {message.media_path && (
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className="absolute top-2 end-2 grid size-7 place-items-center rounded-full bg-black/60 text-white shadow-sm transition-opacity hover:bg-black/80 touch-manipulation"
+                title="Download photo"
+                aria-label="Download photo"
+              >
+                {downloading ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Download className="size-3.5" />
+                )}
+              </button>
+            )}
+          </>
         ) : (
           <div className="flex h-36 w-52 items-center justify-center rounded-xl bg-black/5 dark:bg-white/5">
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -754,15 +891,33 @@ function ChatBubbleMedia({
 
   if (message.message_type === "video") {
     return (
-      <div className="my-1 overflow-hidden rounded-xl">
+      <div className="relative my-1 overflow-hidden rounded-xl group/media">
         {url ? (
-          <video
-            src={url}
-            controls
-            playsInline
-            preload="metadata"
-            className="max-h-72 w-auto max-w-full rounded-xl object-contain bg-black/40"
-          />
+          <>
+            <video
+              src={url}
+              controls
+              playsInline
+              preload="metadata"
+              className="max-h-72 w-auto max-w-full rounded-xl object-contain bg-black/40"
+            />
+            {message.media_path && (
+              <button
+                type="button"
+                onClick={handleDownload}
+                disabled={downloading}
+                className="absolute top-2 end-2 grid size-7 place-items-center rounded-full bg-black/60 text-white shadow-sm transition-opacity hover:bg-black/80 touch-manipulation"
+                title="Download video"
+                aria-label="Download video"
+              >
+                {downloading ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Download className="size-3.5" />
+                )}
+              </button>
+            )}
+          </>
         ) : (
           <div className="flex h-36 w-52 items-center justify-center rounded-xl bg-black/5 dark:bg-white/5">
             <Loader2 className="size-6 animate-spin text-muted-foreground" />
@@ -774,6 +929,201 @@ function ChatBubbleMedia({
 
   return null;
 }
+
+interface MessageItemProps {
+  m: Message;
+  mine: boolean;
+  chatType: "direct" | "group";
+  parent?: Message;
+  senderName: string;
+  othersRead: boolean;
+  isSelected: boolean;
+  canEditMessage: boolean;
+  messageReactions: ReactionRecord[];
+  currentUserId: string;
+  onSelect: (id: string) => void;
+  onContextMenu: (e: React.MouseEvent, id: string) => void;
+  onMouseDown: (e: React.MouseEvent, id: string) => void;
+  onMouseMove: (e: React.MouseEvent) => void;
+  onMouseUp: () => void;
+  onMouseLeave: () => void;
+  onTouchStart: (e: React.TouchEvent, id: string) => void;
+  onTouchMove: (e: React.TouchEvent) => void;
+  onTouchEnd: () => void;
+  onTouchCancel: () => void;
+  onOpenReactions: (messageId: string, anchorRect: DOMRect) => void;
+  onReply: (m: Message) => void;
+  onEdit: (m: Message) => void;
+  onDelete: (m: Message) => void;
+  onToggleReaction: (messageId: string, emoji: ReactionEmoji) => void;
+  onOpenLightbox: (item: LightboxItem) => void;
+  photoText: string;
+  videoText: string;
+  voiceText: string;
+}
+
+const MessageItem = memo(function MessageItem({
+  m,
+  mine,
+  chatType,
+  parent,
+  senderName,
+  othersRead,
+  isSelected,
+  canEditMessage,
+  messageReactions,
+  currentUserId,
+  onSelect,
+  onContextMenu,
+  onMouseDown,
+  onMouseMove,
+  onMouseUp,
+  onMouseLeave,
+  onTouchStart,
+  onTouchMove,
+  onTouchEnd,
+  onTouchCancel,
+  onOpenReactions,
+  onReply,
+  onEdit,
+  onDelete,
+  onToggleReaction,
+  onOpenLightbox,
+  photoText,
+  videoText,
+  voiceText,
+}: MessageItemProps) {
+  return (
+    <div className={`group flex flex-col ${mine ? "items-end" : "items-start"}`}>
+      <div
+        className={`relative max-w-[85%] md:max-w-[75%] rounded-2xl px-3 py-2 text-sm shadow-sm touch-manipulation break-words [overflow-wrap:anywhere] ${
+          mine
+            ? "rounded-ee-sm bg-bubble-out text-bubble-out-foreground"
+            : "rounded-es-sm bg-bubble-in text-bubble-in-foreground"
+        }`}
+        onClick={(e) => {
+          const target = e.target as HTMLElement;
+          if (target.closest("button, a, audio, video, input, textarea")) return;
+          onSelect(m.id);
+        }}
+        onContextMenu={(e) => onContextMenu(e, m.id)}
+        onMouseDown={(e) => onMouseDown(e, m.id)}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseLeave}
+        onTouchStart={(e) => onTouchStart(e, m.id)}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onTouchCancel={onTouchCancel}
+      >
+        {chatType === "group" && !mine && (
+          <div className="text-xs font-bold text-primary truncate">{senderName}</div>
+        )}
+        {parent && (
+          <div className="mb-1 truncate rounded-lg border-s-4 border-primary bg-background/40 px-2 py-1 text-xs opacity-80 break-words [overflow-wrap:anywhere]">
+            {parent.deleted_at ? "Deleted message" : parent.body}
+          </div>
+        )}
+        {m.deleted_at ? (
+          <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] italic opacity-60">
+            This message was deleted
+          </p>
+        ) : (
+          <>
+            {m.message_type && m.message_type !== "text" && (
+              <ChatBubbleMedia message={m} isMine={mine} onOpenLightbox={onOpenLightbox} />
+            )}
+            {m.body &&
+              m.body !== photoText &&
+              m.body !== videoText &&
+              m.body !== voiceText &&
+              m.body !== "Photo" &&
+              m.body !== "Video" &&
+              m.body !== "Voice message" &&
+              m.body !== " " && (
+                <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{m.body}</p>
+              )}
+          </>
+        )}
+        <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] opacity-60">
+          {m.edited_at && !m.deleted_at && <span>edited</span>}
+          <span>{timeLabel(m.created_at)}</span>
+          {mine &&
+            (m.id.startsWith("tmp-") ? (
+              <Check className="size-3" />
+            ) : (
+              <CheckCheck className={`size-3 ${othersRead ? "text-primary" : ""}`} />
+            ))}
+        </div>
+        {!m.deleted_at && !m.id.startsWith("tmp-") && (
+          <div
+            className={`absolute z-20 rounded-full bg-popover p-1 text-popover-foreground shadow-md transition-all ${
+              isSelected ? "flex" : "hidden"
+            } md:hidden md:group-hover:flex max-md:-top-9 max-md:end-1 ${
+              mine ? "md:top-1 md:end-full md:me-1" : "md:top-1 md:start-full md:ms-1"
+            }`}
+          >
+            <button
+              type="button"
+              className="flex size-8 md:size-auto items-center justify-center rounded-full p-1.5 md:p-1 hover:bg-muted touch-manipulation"
+              onClick={(e) => {
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                onOpenReactions(m.id, rect);
+              }}
+              aria-label="React"
+            >
+              <Smile className="size-4 md:size-3.5" />
+            </button>
+            <button
+              type="button"
+              className="flex size-8 md:size-auto items-center justify-center rounded-full p-1.5 md:p-1 hover:bg-muted touch-manipulation"
+              onClick={(e) => {
+                e.stopPropagation();
+                onReply(m);
+              }}
+              aria-label="Reply"
+            >
+              <Reply className="size-4 md:size-3.5" />
+            </button>
+            {canEditMessage && (
+              <button
+                type="button"
+                className="flex size-8 md:size-auto items-center justify-center rounded-full p-1.5 md:p-1 hover:bg-muted touch-manipulation"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onEdit(m);
+                }}
+                aria-label="Edit"
+              >
+                <Pencil className="size-4 md:size-3.5" />
+              </button>
+            )}
+            {mine && (
+              <button
+                type="button"
+                className="flex size-8 md:size-auto items-center justify-center rounded-full p-1.5 md:p-1 hover:bg-muted touch-manipulation text-destructive"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(m);
+                }}
+                aria-label="Delete for everyone"
+              >
+                <Trash2 className="size-4 md:size-3.5" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <ReactionChips
+        reactions={messageReactions}
+        me={currentUserId}
+        onToggleReaction={(emoji) => onToggleReaction(m.id, emoji)}
+        isMine={mine}
+      />
+    </div>
+  );
+});
 
 function ChatView({
   chat,
@@ -803,6 +1153,7 @@ function ChatView({
   const [lightboxItem, setLightboxItem] = useState<LightboxItem | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [reactions, setReactions] = useState<ReactionRecord[]>([]);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [activeReactionTarget, setActiveReactionTarget] = useState<{
     messageId: string;
     anchorRect?: DOMRect | null;
@@ -1314,15 +1665,15 @@ function ChatView({
 
   return (
     <>
-      <header className="flex items-center gap-3 border-b bg-card px-4 py-2.5">
+      <header className="flex items-center gap-2 sm:gap-3 border-b bg-card px-3 py-2 sm:px-4">
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="size-10 shrink-0 md:hidden touch-manipulation"
           onClick={onBack}
           aria-label="Back"
         >
-          <ArrowLeft className="rtl:rotate-180" />
+          <ArrowLeft className="size-5 rtl:rotate-180" />
         </Button>
         <Avatar
           name={chat.name}
@@ -1366,12 +1717,16 @@ function ChatView({
         onDragOver={onDragOver}
         onDragLeave={onDragLeave}
         onDrop={onDrop}
-        className={`chat-wallpaper relative flex-1 overflow-y-auto px-3 py-4 md:px-10 ${
+        className={`chat-wallpaper relative flex-1 overflow-y-auto overflow-x-hidden px-3 py-4 md:px-10 ${
           isDragging ? "ring-2 ring-inset ring-primary" : ""
         }`}
         onScroll={(e) => {
           if (activeReactionTarget) setActiveReactionTarget(null);
+          if (selectedMessageId) setSelectedMessageId(null);
           if (e.currentTarget.scrollTop < 40 && hasMore) loadOlder();
+        }}
+        onClick={() => {
+          if (selectedMessageId) setSelectedMessageId(null);
         }}
       >
         {isDragging && (
@@ -1387,139 +1742,63 @@ function ChatView({
             const mine = m.sender_id === me;
             const parent = m.reply_to_id ? msgs.find((x) => x.id === m.reply_to_id) : undefined;
             return (
-              <div
+              <MessageItem
                 key={m.id}
-                className={`group flex flex-col ${mine ? "items-end" : "items-start"}`}
-              >
-                <div
-                  className={`relative max-w-[80%] rounded-2xl px-3 py-2 text-sm shadow-sm ${mine ? "rounded-ee-sm bg-bubble-out text-bubble-out-foreground" : "rounded-es-sm bg-bubble-in text-bubble-in-foreground"}`}
-                  onContextMenu={(e) => {
-                    if (e.shiftKey) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setActiveReactionTarget({
-                      messageId: m.id,
-                      coords: { x: e.clientX, y: e.clientY },
-                    });
-                  }}
-                  onMouseDown={(e) => handleBubbleMouseDown(e, m.id)}
-                  onMouseMove={handleBubbleMouseMove}
-                  onMouseUp={clearHoldTimer}
-                  onMouseLeave={clearHoldTimer}
-                  onTouchStart={(e) => handleBubbleTouchStart(e, m.id)}
-                  onTouchMove={handleBubbleTouchMove}
-                  onTouchEnd={clearHoldTimer}
-                  onTouchCancel={clearHoldTimer}
-                >
-                  {chat.type === "group" && !mine && (
-                    <div className="text-xs font-bold text-primary">{nameOf(m.sender_id)}</div>
-                  )}
-                  {parent && (
-                    <div className="mb-1 truncate rounded-lg border-s-4 border-primary bg-background/40 px-2 py-1 text-xs opacity-80">
-                      {parent.deleted_at ? "Deleted message" : parent.body}
-                    </div>
-                  )}
-                  {m.deleted_at ? (
-                    <p className="whitespace-pre-wrap break-words italic opacity-60">
-                      This message was deleted
-                    </p>
-                  ) : (
-                    <>
-                      {m.message_type && m.message_type !== "text" && (
-                        <ChatBubbleMedia
-                          message={m}
-                          isMine={mine}
-                          onOpenLightbox={setLightboxItem}
-                        />
-                      )}
-                      {m.body &&
-                        m.body !== t("photo") &&
-                        m.body !== t("video") &&
-                        m.body !== t("voiceMessage") &&
-                        m.body !== "Photo" &&
-                        m.body !== "Video" &&
-                        m.body !== "Voice message" &&
-                        m.body !== " " && (
-                          <p className="whitespace-pre-wrap break-words">{m.body}</p>
-                        )}
-                    </>
-                  )}
-                  <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] opacity-60">
-                    {m.edited_at && !m.deleted_at && <span>edited</span>}
-                    <span>{timeLabel(m.created_at)}</span>
-                    {mine &&
-                      (m.id.startsWith("tmp-") ? (
-                        <Check className="size-3" />
-                      ) : (
-                        <CheckCheck className={`size-3 ${othersRead(m) ? "text-primary" : ""}`} />
-                      ))}
-                  </div>
-                  {!m.deleted_at && !m.id.startsWith("tmp-") && (
-                    <div
-                      className={`absolute top-1 hidden gap-0.5 rounded-full bg-popover p-0.5 text-popover-foreground shadow group-hover:flex ${mine ? "end-full me-1" : "start-full ms-1"}`}
-                    >
-                      <button
-                        type="button"
-                        className="rounded-full p-1 hover:bg-muted"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const rect = e.currentTarget.getBoundingClientRect();
-                          setActiveReactionTarget({
-                            messageId: m.id,
-                            anchorRect: rect,
-                          });
-                        }}
-                        aria-label="React"
-                      >
-                        <Smile className="size-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-full p-1 hover:bg-muted"
-                        onClick={() => setReplyTo(m)}
-                        aria-label="Reply"
-                      >
-                        <Reply className="size-3.5" />
-                      </button>
-                      {canEdit(m, me) && (
-                        <button
-                          type="button"
-                          className="rounded-full p-1 hover:bg-muted"
-                          onClick={() => {
-                            setEditing(m);
-                            setText(m.body);
-                          }}
-                          aria-label="Edit"
-                        >
-                          <Pencil className="size-3.5" />
-                        </button>
-                      )}
-                      {mine && (
-                        <button
-                          type="button"
-                          className="rounded-full p-1 hover:bg-muted"
-                          onClick={() => del(m)}
-                          aria-label="Delete for everyone"
-                        >
-                          <Trash2 className="size-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </div>
-                <ReactionChips
-                  reactions={reactions.filter((r) => r.message_id === m.id)}
-                  me={me}
-                  onToggleReaction={(emoji) => handleToggleReaction(m.id, emoji)}
-                  isMine={mine}
-                />
-              </div>
+                m={m}
+                mine={mine}
+                chatType={chat.type}
+                parent={parent}
+                senderName={nameOf(m.sender_id)}
+                othersRead={othersRead(m)}
+                isSelected={selectedMessageId === m.id}
+                canEditMessage={canEdit(m, me)}
+                messageReactions={reactions.filter((r) => r.message_id === m.id)}
+                currentUserId={me}
+                onSelect={(id) => setSelectedMessageId((prev) => (prev === id ? null : id))}
+                onContextMenu={(e, id) => {
+                  if (e.shiftKey) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setActiveReactionTarget({
+                    messageId: id,
+                    coords: { x: e.clientX, y: e.clientY },
+                  });
+                }}
+                onMouseDown={(e, id) => handleBubbleMouseDown(e, id)}
+                onMouseMove={handleBubbleMouseMove}
+                onMouseUp={clearHoldTimer}
+                onMouseLeave={clearHoldTimer}
+                onTouchStart={(e, id) => handleBubbleTouchStart(e, id)}
+                onTouchMove={handleBubbleTouchMove}
+                onTouchEnd={clearHoldTimer}
+                onTouchCancel={clearHoldTimer}
+                onOpenReactions={(messageId, anchorRect) => {
+                  setActiveReactionTarget({
+                    messageId,
+                    anchorRect,
+                  });
+                }}
+                onReply={(msg) => setReplyTo(msg)}
+                onEdit={(msg) => {
+                  setEditing(msg);
+                  setText(msg.body);
+                }}
+                onDelete={(msg) => del(msg)}
+                onToggleReaction={(messageId, emoji) => handleToggleReaction(messageId, emoji)}
+                onOpenLightbox={setLightboxItem}
+                photoText={t("photo")}
+                videoText={t("video")}
+                voiceText={t("voiceMessage")}
+              />
             );
           })}
         </div>
       </div>
 
-      <form onSubmit={send} className="border-t bg-card px-3 py-2">
+      <form
+        onSubmit={send}
+        className="border-t bg-card px-3 py-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]"
+      >
         <input
           ref={mediaInputRef}
           type="file"
@@ -1600,15 +1879,15 @@ function ChatView({
             type="button"
             size="icon"
             variant="secondary"
-            className="shrink-0 rounded-full"
+            className="size-10 shrink-0 rounded-full touch-manipulation"
             onClick={() => mediaInputRef.current?.click()}
             aria-label={t("attachMedia")}
           >
-            <Paperclip className="size-4" />
+            <Paperclip className="size-5 sm:size-4" />
           </Button>
 
           <Input
-            className="rounded-full"
+            className="h-10 rounded-full text-base md:text-sm"
             placeholder={pendingMedia ? "Add a caption..." : t("typeMessage")}
             value={text}
             maxLength={8000}
@@ -1620,8 +1899,13 @@ function ChatView({
             disabled={uploadProgress !== null}
           />
 
-          <Button type="submit" size="icon" className="shrink-0 rounded-full" aria-label="Send">
-            <Send className="rtl:rotate-180" />
+          <Button
+            type="submit"
+            size="icon"
+            className="size-10 shrink-0 rounded-full touch-manipulation"
+            aria-label="Send"
+          >
+            <Send className="size-5 sm:size-4 rtl:rotate-180" />
           </Button>
         </div>
       </form>

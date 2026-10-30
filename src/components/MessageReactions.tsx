@@ -75,7 +75,7 @@ export function ReactionFloatingBar({
     <div
       ref={barRef}
       style={{ top: `${top}px`, left: `${left}px` }}
-      className="fixed z-50 flex items-center gap-1 rounded-full border border-border/80 bg-popover/95 p-1.5 shadow-xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-150 select-none"
+      className="fixed z-50 flex items-center gap-1 rounded-full border border-border/80 bg-popover/98 md:bg-popover/95 p-1.5 shadow-lg md:shadow-xl md:backdrop-blur-md animate-in fade-in zoom-in-95 duration-150 select-none touch-manipulation max-w-[calc(100%-24px)] overflow-x-auto"
       onClick={(e) => e.stopPropagation()}
     >
       {REACTION_EMOJIS.map((emoji) => {
@@ -95,7 +95,7 @@ export function ReactionFloatingBar({
               onSelectEmoji(emoji);
               onClose();
             }}
-            className={`grid size-8 place-items-center rounded-full text-lg leading-none transition-transform hover:scale-125 active:scale-95 ${
+            className={`grid size-9 md:size-8 shrink-0 place-items-center rounded-full text-lg leading-none transition-transform hover:scale-125 active:scale-95 touch-manipulation ${
               isSelected ? "bg-primary/20 ring-1 ring-primary" : "hover:bg-muted"
             }`}
             aria-label={`React with ${emoji}`}
@@ -142,7 +142,7 @@ export function ReactionChips({
             e.stopPropagation();
             onToggleReaction(emoji as ReactionEmoji);
           }}
-          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors active:scale-95 select-none ${
+          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors active:scale-95 select-none touch-manipulation min-h-[28px] ${
             info.hasMine
               ? "border-primary/40 bg-primary/15 text-primary font-semibold shadow-xs"
               : "border-border/60 bg-background/80 text-foreground hover:bg-muted/80 shadow-xs"

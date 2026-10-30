@@ -54,19 +54,36 @@ function createSupabaseFetch(supabaseUrl: string, supabaseKey: string): typeof f
   };
 }
 
-function createSupabaseClient() {
-  // Use import.meta.env for client-side (Vite build-time replacement)
-  // Fall back to process.env for SSR (server-side rendering)
-  const SUPABASE_URL =
-    import.meta.env["VITE_SUPABASE_URL"] ||
-    process.env["SUPABASE_URL"] ||
-    "https://placeholder-project.supabase.co";
-  const SUPABASE_PUBLISHABLE_KEY =
-    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
-    process.env["SUPABASE_PUBLISHABLE_KEY"] ||
-    "sb_publishable_placeholder_token_for_preview";
+export function getSupabaseEnv() {
+  const url =
+    (typeof process !== "undefined" &&
+      (process.env?.["VITE_SUPABASE_URL"] || process.env?.["SUPABASE_URL"])) ||
+    (typeof import.meta !== "undefined" &&
+      (import.meta.env?.["VITE_SUPABASE_URL"] || import.meta.env?.["SUPABASE_URL"])) ||
+    "";
 
-  if (!import.meta.env["VITE_SUPABASE_URL"] && !process.env["SUPABASE_URL"]) {
+  const key =
+    (typeof process !== "undefined" &&
+      (process.env?.["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
+        process.env?.["SUPABASE_PUBLISHABLE_KEY"])) ||
+    (typeof import.meta !== "undefined" &&
+      (import.meta.env?.["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
+        import.meta.env?.["SUPABASE_PUBLISHABLE_KEY"])) ||
+    "";
+
+  return {
+    url,
+    key,
+    isConfigured: Boolean(url && key && !url.includes("placeholder-project")),
+  };
+}
+
+function createSupabaseClient() {
+  const env = getSupabaseEnv();
+  const SUPABASE_URL = env.url || "https://placeholder-project.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = env.key || "sb_publishable_placeholder_token_for_preview";
+
+  if (!env.isConfigured) {
     console.warn(
       "[Supabase] SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY not configured. Running with fallback credentials.",
     );

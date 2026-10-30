@@ -56,10 +56,16 @@ export function VoiceRecorder({
   const cancelledRef = useRef<boolean>(false);
   const durationRef = useRef<number>(0);
 
-  // Pick best supported MIME type for cross-browser / iOS Safari compatibility
+  // Pick best supported MIME type: audio/mp4 (AAC), then audio/webm;codecs=opus, then audio/ogg;codecs=opus
   function getSupportedMimeType(): string {
     if (typeof MediaRecorder === "undefined") return "";
-    const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/aac", "audio/ogg"];
+    const types = [
+      "audio/mp4",
+      "audio/webm;codecs=opus",
+      "audio/ogg;codecs=opus",
+      "audio/webm",
+      "audio/aac",
+    ];
     for (const type of types) {
       if (MediaRecorder.isTypeSupported(type)) {
         return type;
@@ -157,7 +163,6 @@ export function VoiceRecorder({
       };
 
       recorder.onstop = async () => {
-        stopTracks();
         if (timerRef.current) {
           clearInterval(timerRef.current);
           timerRef.current = null;
@@ -165,14 +170,19 @@ export function VoiceRecorder({
 
         if (cancelledRef.current) {
           audioChunksRef.current = [];
+          stopTracks();
           return;
         }
 
+        const realMime = recorder.mimeType || mimeType || "audio/webm";
         const audioBlob = new Blob(audioChunksRef.current, {
-          type: recorder.mimeType || "audio/webm",
+          type: realMime,
         });
 
-        const finalDuration = durationRef.current;
+        // Stop all media tracks only after Blob is safely built
+        stopTracks();
+
+        const finalDuration = Math.round(durationRef.current);
         if (finalDuration < 1 && audioBlob.size < 2000) {
           toast.info("Voice note too short");
           return;
@@ -186,7 +196,8 @@ export function VoiceRecorder({
         }
       };
 
-      recorder.start(100);
+      // Start recording without timeslice to prevent chunk drop / data loss
+      recorder.start();
       setIsRecording(true);
       setSeconds(0);
 
@@ -230,8 +241,16 @@ export function VoiceRecorder({
       clearInterval(timerRef.current);
       timerRef.current = null;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        if (typeof recorder.requestData === "function") {
+          recorder.requestData();
+        }
+      } catch {
+        // ignore if not allowed in current state
+      }
+      recorder.stop();
     }
     setIsRecording(false);
     setSlideCancelActive(false);
@@ -296,7 +315,7 @@ export function VoiceRecorder({
             size="icon"
             variant="ghost"
             onClick={cancelRecording}
-            className="size-8 rounded-full text-destructive hover:bg-destructive/10"
+            className="size-10 sm:size-8 rounded-full text-destructive hover:bg-destructive/10 touch-manipulation"
             aria-label="Cancel voice note"
           >
             <Trash2 className="size-4" />
@@ -306,7 +325,7 @@ export function VoiceRecorder({
             type="button"
             size="icon"
             onClick={stopRecording}
-            className="size-8 rounded-full bg-primary text-primary-foreground hover:bg-primary/90"
+            className="size-10 sm:size-8 rounded-full bg-primary text-primary-foreground hover:bg-primary/90 touch-manipulation"
             aria-label="Finish and send voice note"
           >
             <Square className="size-3.5 fill-current" />
@@ -327,10 +346,10 @@ export function VoiceRecorder({
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
-        className="shrink-0 rounded-full"
+        className="size-10 shrink-0 rounded-full touch-manipulation"
         aria-label="Record voice note"
       >
-        <Mic className="size-4" />
+        <Mic className="size-5 sm:size-4" />
       </Button>
 
       <Dialog open={showPrompt} onOpenChange={setShowPrompt}>

@@ -29,7 +29,7 @@ export const Route = createFileRoute("/")({
 function Landing() {
   const { t, lang } = useI18n();
   return (
-    <div className="min-h-screen bg-hero">
+    <div className="min-h-screen bg-hero overflow-x-hidden">
       <header className="mx-auto flex max-w-6xl items-center justify-between px-5 py-5">
         <Brand />
         <div className="flex items-center gap-2">
@@ -41,7 +41,7 @@ function Landing() {
       </header>
       <main className="mx-auto grid max-w-6xl items-center gap-10 px-5 pb-20 pt-8 md:grid-cols-2">
         <div>
-          <h1 className="text-5xl font-extrabold leading-[1.05] md:text-6xl">
+          <h1 className="text-4xl sm:text-5xl font-extrabold leading-[1.05] md:text-6xl break-words">
             {lang === "ur" ? "ٹیچو برادرز" : "Techu Brothers"}
           </h1>
           <p className="mt-5 max-w-md text-xl text-muted-foreground">{t("tagline")}</p>

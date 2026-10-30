@@ -1,17 +1,28 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Loader2, Pause, Play } from "lucide-react";
+import { Download, Loader2, Pause, Play, RefreshCw } from "lucide-react";
 import { formatDuration } from "@/lib/media-utils";
+import { downloadMedia } from "@/lib/media-storage";
+import { toast } from "sonner";
 
 const GLOBAL_AUDIO_PLAY_EVENT = "techu-audio-playing";
+
+// In-memory cache per audio source URL / path so blobs are never downloaded twice
+const voiceBlobCache = new Map<string, Blob>();
 
 export function AudioPlayerBubble({
   src,
   durationSeconds,
   isMine,
+  mimeType,
+  mediaPath,
+  onRefreshUrl,
 }: {
   src: string | null;
   durationSeconds?: number | null;
   isMine: boolean;
+  mimeType?: string | null;
+  mediaPath?: string | null;
+  onRefreshUrl?: () => Promise<string | null>;
 }) {
   const instanceId = useId();
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -22,12 +33,24 @@ export function AudioPlayerBubble({
   const [audioDuration, setAudioDuration] = useState<number | null>(null);
   const [playbackRate, setPlaybackRate] = useState<1 | 1.5 | 2>(1);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [isLoadingBlob, setIsLoadingBlob] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const [activeBlobUrl, setActiveBlobUrl] = useState<string | null>(null);
 
-  // Compute effective duration: prefer finite audio.duration; fallback to media_duration_seconds
-  const effectiveDuration = (() => {
-    if (audioDuration !== null && Number.isFinite(audioDuration) && audioDuration > 0) {
-      return audioDuration;
+  // Check if format can be played on this device
+  const isFormatSupported = (() => {
+    if (typeof window === "undefined" || !mimeType) return true;
+    try {
+      const a = document.createElement("audio");
+      return a.canPlayType(mimeType) !== "";
+    } catch {
+      return true;
     }
+  })();
+
+  // Compute effective duration: prefer stored media_duration_seconds, fallback to finite audio.duration
+  const effectiveDuration = (() => {
     if (
       durationSeconds !== null &&
       durationSeconds !== undefined &&
@@ -35,6 +58,9 @@ export function AudioPlayerBubble({
       durationSeconds > 0
     ) {
       return Math.round(durationSeconds);
+    }
+    if (audioDuration !== null && Number.isFinite(audioDuration) && audioDuration > 0) {
+      return audioDuration;
     }
     return 0;
   })();
@@ -54,6 +80,19 @@ export function AudioPlayerBubble({
       window.removeEventListener(GLOBAL_AUDIO_PLAY_EVENT, handleOtherPlay);
     };
   }, [instanceId]);
+
+  // Clean up created object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (activeBlobUrl && activeBlobUrl.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(activeBlobUrl);
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [activeBlobUrl]);
 
   // Audio element listeners
   useEffect(() => {
@@ -88,19 +127,29 @@ export function AudioPlayerBubble({
     };
 
     const onWaiting = () => setIsBuffering(true);
+    const onStalled = () => setIsBuffering(true);
     const onPlaying = () => {
       setIsBuffering(false);
       setIsPlaying(true);
     };
+    const onCanPlay = () => setIsBuffering(false);
     const onPause = () => setIsPlaying(false);
+    const onError = () => {
+      setIsBuffering(false);
+      setIsPlaying(false);
+      setHasError(true);
+    };
 
     audio.addEventListener("timeupdate", updateFromAudio);
     audio.addEventListener("loadedmetadata", onLoadedMetadata);
     audio.addEventListener("durationchange", onDurationChange);
     audio.addEventListener("ended", onEnded);
     audio.addEventListener("waiting", onWaiting);
+    audio.addEventListener("stalled", onStalled);
+    audio.addEventListener("canplay", onCanPlay);
     audio.addEventListener("playing", onPlaying);
     audio.addEventListener("pause", onPause);
+    audio.addEventListener("error", onError);
 
     return () => {
       audio.removeEventListener("timeupdate", updateFromAudio);
@@ -108,18 +157,14 @@ export function AudioPlayerBubble({
       audio.removeEventListener("durationchange", onDurationChange);
       audio.removeEventListener("ended", onEnded);
       audio.removeEventListener("waiting", onWaiting);
+      audio.removeEventListener("stalled", onStalled);
+      audio.removeEventListener("canplay", onCanPlay);
       audio.removeEventListener("playing", onPlaying);
       audio.removeEventListener("pause", onPause);
+      audio.removeEventListener("error", onError);
       audio.pause();
-      if (src && src.startsWith("blob:")) {
-        try {
-          URL.revokeObjectURL(src);
-        } catch {
-          // ignore
-        }
-      }
     };
-  }, [src]);
+  }, []);
 
   // Smooth requestAnimationFrame while playing for seamless progress bar fill
   useEffect(() => {
@@ -139,6 +184,41 @@ export function AudioPlayerBubble({
     };
   }, [isPlaying]);
 
+  // Load audio blob reliably for Android Chrome / Data Saver
+  const loadAudioBlob = async (targetSrc: string): Promise<string> => {
+    if (targetSrc.startsWith("blob:")) return targetSrc;
+
+    const cacheKey = mediaPath || targetSrc;
+    const cached = voiceBlobCache.get(cacheKey);
+    if (cached) {
+      const objUrl = URL.createObjectURL(cached);
+      setActiveBlobUrl(objUrl);
+      return objUrl;
+    }
+
+    setIsLoadingBlob(true);
+    try {
+      let resp = await fetch(targetSrc);
+      if (!resp.ok && (resp.status === 400 || resp.status === 403) && onRefreshUrl) {
+        // Refresh signed URL once if expired
+        const fresh = await onRefreshUrl();
+        if (fresh) {
+          resp = await fetch(fresh);
+        }
+      }
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const blob = await resp.blob();
+      voiceBlobCache.set(cacheKey, blob);
+      const objUrl = URL.createObjectURL(blob);
+      setActiveBlobUrl(objUrl);
+      return objUrl;
+    } finally {
+      setIsLoadingBlob(false);
+    }
+  };
+
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio || !src) return;
@@ -146,17 +226,78 @@ export function AudioPlayerBubble({
     if (isPlaying) {
       audio.pause();
       setIsPlaying(false);
-    } else {
-      // Notify other players to pause first
-      window.dispatchEvent(
-        new CustomEvent(GLOBAL_AUDIO_PLAY_EVENT, { detail: { id: instanceId } }),
-      );
-      try {
-        await audio.play();
-        setIsPlaying(true);
-      } catch (err) {
-        console.error("Playback error:", err);
+      return;
+    }
+
+    setHasError(false);
+    window.dispatchEvent(
+      new CustomEvent(GLOBAL_AUDIO_PLAY_EVENT, { detail: { id: instanceId } }),
+    );
+
+    try {
+      let playUrl = activeBlobUrl;
+      if (!playUrl) {
+        playUrl = await loadAudioBlob(src);
+        audio.src = playUrl;
+        audio.load();
       }
+
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        await playPromise;
+        setIsPlaying(true);
+      }
+    } catch (err) {
+      console.error("Audio playback error:", err);
+      setIsPlaying(false);
+      setHasError(true);
+    }
+  };
+
+  const handleRetry = async () => {
+    setHasError(false);
+    if (onRefreshUrl) {
+      try {
+        const fresh = await onRefreshUrl();
+        if (fresh) {
+          await loadAudioBlob(fresh);
+          togglePlay();
+          return;
+        }
+      } catch (e) {
+        console.error("Retry audio error:", e);
+      }
+    }
+    if (src) {
+      try {
+        await loadAudioBlob(src);
+        togglePlay();
+      } catch {
+        setHasError(true);
+      }
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!mediaPath) {
+      if (activeBlobUrl) {
+        const a = document.createElement("a");
+        a.href = activeBlobUrl;
+        a.download = `voice-note-${Date.now()}.${mimeType?.includes("mp4") ? "mp4" : "webm"}`;
+        a.click();
+        return;
+      }
+      toast.error("Download link unavailable");
+      return;
+    }
+    setIsDownloading(true);
+    try {
+      await downloadMedia({ path: mediaPath, mimeType });
+      toast.success("Voice note downloaded");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to download voice note");
+    } finally {
+      setIsDownloading(false);
     }
   };
 
@@ -201,31 +342,64 @@ export function AudioPlayerBubble({
   const progressPercent =
     effectiveDuration > 0 ? Math.min(100, Math.max(0, (currentTime / effectiveDuration) * 100)) : 0;
 
+  if (!isFormatSupported) {
+    return (
+      <div className="flex flex-col gap-1.5 py-1 text-xs">
+        <span className="opacity-80">This voice note cannot be played on this device</span>
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={isDownloading}
+          className="inline-flex items-center gap-1.5 font-semibold text-primary underline hover:opacity-80 touch-manipulation"
+        >
+          {isDownloading ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Download className="size-3.5" />
+          )}
+          Download voice note
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex w-64 max-w-full items-center gap-2 py-1 select-none">
-      {src && <audio ref={audioRef} src={src} preload="metadata" />}
+    <div className="flex w-full min-w-0 max-w-[270px] sm:w-64 items-center gap-2 py-1 select-none">
+      <audio ref={audioRef} preload="none" />
 
-      <button
-        type="button"
-        onClick={togglePlay}
-        disabled={!src}
-        className={`grid size-9 shrink-0 place-items-center rounded-full transition-transform active:scale-95 ${
-          isMine
-            ? "bg-primary text-primary-foreground hover:opacity-90"
-            : "bg-primary text-primary-foreground hover:opacity-90"
-        }`}
-        aria-label={isPlaying ? "Pause voice note" : "Play voice note"}
-      >
-        {isBuffering ? (
-          <Loader2 className="size-4 animate-spin" />
-        ) : isPlaying ? (
-          <Pause className="size-4 fill-current" />
-        ) : (
-          <Play className="ms-0.5 size-4 fill-current" />
-        )}
-      </button>
+      {hasError ? (
+        <button
+          type="button"
+          onClick={handleRetry}
+          className="grid size-10 shrink-0 place-items-center rounded-full bg-destructive text-destructive-foreground hover:opacity-90 touch-manipulation"
+          title="Retry loading voice note"
+          aria-label="Retry voice note"
+        >
+          <RefreshCw className="size-4" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={togglePlay}
+          disabled={!src || isLoadingBlob}
+          className={`grid size-10 shrink-0 place-items-center rounded-full transition-transform active:scale-95 touch-manipulation ${
+            isMine
+              ? "bg-primary text-primary-foreground hover:opacity-90"
+              : "bg-primary text-primary-foreground hover:opacity-90"
+          }`}
+          aria-label={isPlaying ? "Pause voice note" : "Play voice note"}
+        >
+          {isLoadingBlob || isBuffering ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : isPlaying ? (
+            <Pause className="size-4 fill-current" />
+          ) : (
+            <Play className="ms-0.5 size-4 fill-current" />
+          )}
+        </button>
+      )}
 
-      <div className="flex flex-1 flex-col justify-center gap-1">
+      <div className="flex flex-1 min-w-0 flex-col justify-center gap-1">
         <div
           ref={progressBarRef}
           className="relative h-2.5 w-full cursor-pointer touch-none rounded-full bg-black/10 py-0.5 dark:bg-white/10"
@@ -246,11 +420,28 @@ export function AudioPlayerBubble({
       <button
         type="button"
         onClick={cycleSpeed}
-        className="rounded px-1.5 py-0.5 text-xs font-semibold opacity-70 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5"
+        className="rounded px-1.5 py-1 text-xs font-semibold opacity-70 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 touch-manipulation min-h-[36px] flex items-center shrink-0"
         aria-label={`Playback speed: ${playbackRate}x`}
       >
         {playbackRate}x
       </button>
+
+      {mediaPath && (
+        <button
+          type="button"
+          onClick={handleDownload}
+          disabled={isDownloading}
+          className="grid size-8 shrink-0 place-items-center rounded-full opacity-60 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 touch-manipulation"
+          title="Download voice note"
+          aria-label="Download voice note"
+        >
+          {isDownloading ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : (
+            <Download className="size-3.5" />
+          )}
+        </button>
+      )}
     </div>
   );
 }
